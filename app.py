@@ -7,12 +7,13 @@ from ping3 import ping
 from datetime import datetime
 import threading
 import time
-import json
 import os
 import base64
 from mss import mss
 from io import BytesIO
-
+from dicttoxml import dicttoxml
+from xml.dom.minidom import parseString
+import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -25,61 +26,97 @@ COMMON_PORTS = "21-23,25,53,80,110,139,443,445,1433,3306,3389,5900,8080"
 if not os.path.exists(SCAN_RESULTS_DIR):
     os.makedirs(SCAN_RESULTS_DIR)
 
-def get_system_info():
-    hostname = socket.gethostname()
-    try:
-        ip = socket.gethostbyname(hostname)
-    except:
-        ip = "Non disponible"
-    return {
-        "hostname": hostname,
-        "ip": ip,
-        "version": VERSION
-    }
-
-def get_service_name(port, protocol):
-    try:
-        service = socket.getservbyport(int(port), protocol)
-        return service
-    except:
-        return "unknown"
-
 def capture_screen():
     """Capture l'écran et retourne l'image en base64"""
     with mss() as sct:
-        # Capture le moniteur principal
-        screenshot = sct.shot(output=None)  # Retourne les bytes de l'image PNG
+        screenshot = sct.shot(output=None)
         return base64.b64encode(screenshot).decode()
 
 def save_scan_results(results):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    """Sauvegarde les résultats en XML"""
+    # Format: scan_YYYYMMDD.xml
+    timestamp = datetime.now().strftime("%Y%m%d")
     
     # Capture d'écran
-    screenshot = capture_screen()
-    results['screenshot'] = screenshot
+    try:
+        screenshot = capture_screen()
+    except Exception as e:
+        print(f"Erreur lors de la capture d'écran: {e}")
+        screenshot = ""
     
-    # Sauvegarde dans un fichier JSON
-    filename = f"scan_{timestamp}.json"
-    filepath = os.path.join(SCAN_RESULTS_DIR, filename)
+    # Préparation des données pour XML
+    xml_data = {
+        'scan': {
+            'metadata': {
+                'date': datetime.now().strftime("%d/%m/%Y"),
+                'network': results.get('network', 'unknown')
+            },
+            'screenshot': screenshot,
+            'hosts': results.get('hosts', [])
+        }
+    }
     
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=4, ensure_ascii=False)
+    # Création du fichier XML
+    xml_filename = f"scan_{timestamp}.xml"
+    xml_filepath = os.path.join(SCAN_RESULTS_DIR, xml_filename)
     
-    return filename
+    try:
+        # Conversion en XML avec une structure personnalisée
+        xml = dicttoxml(xml_data, custom_root='network_scan', attr_type=False)
+        # Formatage du XML pour le rendre plus lisible
+        dom = parseString(xml)
+        
+        with open(xml_filepath, 'w', encoding='utf-8') as f:
+            f.write(dom.toprettyxml())
+        
+        return xml_filename
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde XML: {e}")
+        return None
+
+def xml_to_dict(xml_file):
+    """Convertit un fichier XML en dictionnaire pour l'interface web"""
+    tree = ET.parse(xml_file)
+    root = tree.getroot()
+    
+    # Extraction des données
+    scan = root.find('.//scan')
+    metadata = scan.find('metadata')
+    hosts = scan.find('hosts')
+    
+    return {
+        'date': metadata.find('date').text,
+        'network': metadata.find('network').text,
+        'hosts': [
+            {
+                'ip': host.find('ip').text,
+                'hostname': host.find('hostname').text,
+                'ports': [
+                    {
+                        'port': int(port.find('port').text),
+                        'service': port.find('service').text,
+                        'version': port.find('version').text if port.find('version').text else '',
+                        'protocol': port.find('protocol').text
+                    }
+                    for port in host.find('ports').findall('item')
+                ]
+            }
+            for host in hosts.findall('item')
+        ]
+    }
 
 def scan_network():
     nm = nmap.PortScanner()
     network = "192.168.1.0/24"
     
-    socketio.emit('scan_status', {'status': 'En cours...'})
-    
     try:
-        nm.scan(hosts=network, arguments=f'-T4 -p{COMMON_PORTS} --min-rate 1000')
+        # Scan avec nmap
+        nm.scan(hosts=network, arguments=f'-T4 -p{COMMON_PORTS}')
         
         results = {
-            'hosts': [],
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'network': network
+            'timestamp': datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            'network': network,
+            'hosts': []
         }
         
         for host in nm.all_hosts():
@@ -95,7 +132,7 @@ def scan_network():
                         if nm[host]['tcp'][port]['state'] == 'open':
                             service_name = nm[host]['tcp'][port]['name']
                             if service_name == '':
-                                service_name = get_service_name(port, 'tcp')
+                                service_name = "unknown"
                             
                             open_ports.append({
                                 'port': port,
@@ -104,33 +141,88 @@ def scan_network():
                                 'protocol': 'tcp'
                             })
                 
-                if 'udp' in nm[host]:
-                    for port in nm[host]['udp']:
-                        if nm[host]['udp'][port]['state'] == 'open':
-                            service_name = nm[host]['udp'][port]['name']
-                            if service_name == '':
-                                service_name = get_service_name(port, 'udp')
-                            
-                            open_ports.append({
-                                'port': port,
-                                'service': service_name,
-                                'version': nm[host]['udp'][port].get('version', ''),
-                                'protocol': 'udp'
-                            })
-                
                 results['hosts'].append({
                     'ip': host,
                     'hostname': hostname,
                     'ports': open_ports
                 })
         
-        # Sauvegarder les résultats avec la capture d'écran
-        filename = save_scan_results(results)
-        results['filename'] = filename
+        try:
+            # Sauvegarde en XML
+            filename = save_scan_results(results)
+            if filename:
+                print(f"Scan sauvegardé dans {filename}")
+        except Exception as e:
+            print(f"Erreur lors de la sauvegarde du scan: {e}")
         
+        # Envoi des résultats à l'interface web
         socketio.emit('scan_results', results)
+        
     except Exception as e:
-        socketio.emit('scan_error', {'error': str(e)})
+        error_msg = f"Erreur lors du scan: {str(e)}"
+        print(error_msg)
+        socketio.emit('scan_error', {'error': error_msg})
+
+def get_system_info():
+    """Récupère les informations système"""
+    hostname = socket.gethostname()
+    try:
+        ip = socket.gethostbyname(hostname)
+    except:
+        ip = "Non disponible"
+    return {
+        "hostname": hostname,
+        "ip": ip,
+        "version": VERSION
+    }
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/scans')
+def list_scans():
+    """Liste tous les scans disponibles"""
+    scans = []
+    for filename in os.listdir(SCAN_RESULTS_DIR):
+        if filename.endswith('.xml'):
+            filepath = os.path.join(SCAN_RESULTS_DIR, filename)
+            data = xml_to_dict(filepath)
+            scans.append({
+                'filename': filename,
+                'date': data['date'],
+                'host_count': len(data['hosts'])
+            })
+    return jsonify(scans)
+
+@app.route('/api/scans/<filename>')
+def get_scan(filename):
+    """Récupère les résultats d'un scan"""
+    filepath = os.path.join(SCAN_RESULTS_DIR, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath, mimetype='application/xml')
+    return jsonify({'error': 'Scan non trouvé'}), 404
+
+@app.route('/api/latest_scan')
+def get_latest_scan():
+    """Récupère le dernier scan effectué"""
+    scans = [f for f in os.listdir(SCAN_RESULTS_DIR) if f.endswith('.xml')]
+    if not scans:
+        return jsonify({'error': 'Aucun scan disponible'}), 404
+    
+    latest_scan = max(scans, key=lambda x: os.path.getctime(os.path.join(SCAN_RESULTS_DIR, x)))
+    return get_scan(latest_scan)
+
+@app.route('/system_info')
+def system_info():
+    """Endpoint pour récupérer les informations système"""
+    return jsonify(get_system_info())
+
+@socketio.on('start_scan')
+def handle_scan_request():
+    thread = threading.Thread(target=scan_network)
+    thread.daemon = True
+    thread.start()
 
 def monitor_wan_latency():
     while True:
@@ -142,79 +234,6 @@ def monitor_wan_latency():
         
         socketio.emit('wan_latency', {'latency': latency})
         time.sleep(5)
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/system_info')
-def system_info():
-    return jsonify(get_system_info())
-
-@app.route('/api/scan', methods=['POST'])
-def receive_scan():
-    """Endpoint pour recevoir les résultats du scan avec capture d'écran"""
-    try:
-        data = request.json
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"scan_{timestamp}.json"
-        filepath = os.path.join(SCAN_RESULTS_DIR, filename)
-        
-        # Sauvegarde des données
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Données reçues et sauvegardées',
-            'filename': filename
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-@app.route('/api/scans')
-def list_scans():
-    """Liste tous les scans disponibles"""
-    scans = []
-    for filename in os.listdir(SCAN_RESULTS_DIR):
-        if filename.endswith('.json'):
-            filepath = os.path.join(SCAN_RESULTS_DIR, filename)
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                scans.append({
-                    'filename': filename,
-                    'timestamp': data['timestamp'],
-                    'host_count': len(data['hosts']),
-                    'has_screenshot': 'screenshot' in data
-                })
-    return jsonify(scans)
-
-@app.route('/api/scans/<filename>')
-def get_scan(filename):
-    """Récupère les résultats d'un scan spécifique"""
-    filepath = os.path.join(SCAN_RESULTS_DIR, filename)
-    if os.path.exists(filepath):
-        return send_file(filepath, mimetype='application/json')
-    return jsonify({'error': 'Scan non trouvé'}), 404
-
-@app.route('/api/latest_scan')
-def get_latest_scan():
-    """Récupère le dernier scan effectué"""
-    scans = os.listdir(SCAN_RESULTS_DIR)
-    if not scans:
-        return jsonify({'error': 'Aucun scan disponible'}), 404
-    
-    latest_scan = max(scans, key=lambda x: os.path.getctime(os.path.join(SCAN_RESULTS_DIR, x)))
-    return get_scan(latest_scan)
-
-@socketio.on('start_scan')
-def handle_scan_request():
-    thread = threading.Thread(target=scan_network)
-    thread.daemon = True
-    thread.start()
 
 if __name__ == '__main__':
     latency_thread = threading.Thread(target=monitor_wan_latency)

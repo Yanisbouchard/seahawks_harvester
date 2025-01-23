@@ -64,73 +64,29 @@ function formatPorts(ports) {
     </div>`;
 }
 
-// Gestion du scan
-function startScan() {
-    const button = document.getElementById('start-scan');
-    const spinner = document.getElementById('scan-spinner');
-    const status = document.getElementById('scan-status');
-    
-    // Désactiver le bouton et afficher le spinner
-    button.disabled = true;
-    button.classList.add('opacity-50', 'cursor-not-allowed');
-    spinner.classList.remove('hidden');
-    status.classList.remove('hidden');
-    
-    document.getElementById('scan-results').innerHTML = '';
-}
-
-function endScan() {
-    const button = document.getElementById('start-scan');
-    const spinner = document.getElementById('scan-spinner');
-    const status = document.getElementById('scan-status');
-    
-    // Réactiver le bouton et cacher le spinner
-    button.disabled = false;
-    button.classList.remove('opacity-50', 'cursor-not-allowed');
-    spinner.classList.add('hidden');
-    status.classList.add('hidden');
-}
-
 // Gestionnaire du bouton de scan
 document.getElementById('start-scan').addEventListener('click', function() {
     socket.emit('start_scan');
-    startScan();
+    document.getElementById('scan-results').innerHTML = '<p class="text-blue-600">Scan en cours...</p>';
+    document.getElementById('start-scan').disabled = true;
 });
 
 // Écouteurs Socket.IO
-socket.on('scan_status', function(data) {
-    document.getElementById('scan-status').textContent = data.status;
-});
-
-socket.on('scan_error', function(data) {
-    endScan();
-    document.getElementById('scan-results').innerHTML = `
-        <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4">
-            <p class="font-bold">Erreur lors du scan</p>
-            <p>${data.error}</p>
-        </div>
-    `;
-});
-
 socket.on('scan_results', function(data) {
-    endScan();
-    
     let resultsHtml = `
-        <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mb-4">
-            <p class="font-bold">Scan terminé avec succès</p>
-            <p>Scan effectué le: ${data.timestamp}</p>
-            <p>Machines détectées: ${data.hosts.length}</p>
-        </div>
         <div class="space-y-4">
+            <p class="font-bold">Scan effectué le: ${data.timestamp}</p>
+            <p>Machines détectées: ${data.hosts.length}</p>
+            <div class="mt-4 space-y-4">
     `;
     
     data.hosts.forEach(host => {
         resultsHtml += `
-            <div class="p-4 bg-gray-50 rounded-lg border border-gray-200">
+            <div class="p-4 bg-gray-50 rounded-lg">
                 <div class="flex justify-between items-start">
                     <div>
-                        <p class="font-bold text-lg">${host.hostname}</p>
-                        <p class="text-gray-600">IP: ${host.ip}</p>
+                        <p class="font-bold">IP: ${host.ip}</p>
+                        <p class="text-gray-600">Hostname: ${host.hostname}</p>
                     </div>
                 </div>
                 ${formatPorts(host.ports)}
@@ -138,8 +94,19 @@ socket.on('scan_results', function(data) {
         `;
     });
     
-    resultsHtml += '</div>';
+    resultsHtml += '</div></div>';
     document.getElementById('scan-results').innerHTML = resultsHtml;
+    document.getElementById('start-scan').disabled = false;
+});
+
+socket.on('scan_error', function(data) {
+    document.getElementById('scan-results').innerHTML = `
+        <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4">
+            <p class="font-bold">Erreur lors du scan</p>
+            <p>${data.error}</p>
+        </div>
+    `;
+    document.getElementById('start-scan').disabled = false;
 });
 
 socket.on('wan_latency', function(data) {
@@ -149,9 +116,7 @@ socket.on('wan_latency', function(data) {
         latencyElement.className = 'text-2xl font-bold text-center text-red-500';
     } else {
         latencyElement.textContent = `${data.latency} ms`;
-        latencyElement.className = 'text-2xl font-bold text-center ' + 
-            (data.latency < 100 ? 'text-green-500' : 
-             data.latency < 200 ? 'text-yellow-500' : 'text-red-500');
+        latencyElement.className = 'text-2xl font-bold text-center text-green-500';
     }
     
     // Mise à jour du graphique
