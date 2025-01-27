@@ -1,0 +1,36 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  PROJECT_NAME: "seahawks_harvester"
+
+before_script:
+  - echo "Setup environment"
+  - python3 -m venv venv
+  - source venv/bin/activate
+  - pip install -r requirements.txt
+
+test:
+  stage: test
+  script:
+    - echo "Running tests"
+    - pytest --junitxml=report.xml
+  artifacts:
+    reports:
+      junit: report.xml
+
+build:
+  stage: build
+  script:
+    - echo "Building the project"
+    - python setup.py sdist
+
+deploy:
+  stage: deploy
+  only:
+    - main
+  script:
+    - echo "Deploying to production server"
+    - ./deploy.sh
